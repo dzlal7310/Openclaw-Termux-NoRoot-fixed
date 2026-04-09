@@ -1,0 +1,390 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Auto Setup Script Comparison</title>
+  <style>
+    body { font-family: Consolas, "Courier New", monospace; margin: 0; background: #f5f7fb; }
+    h1 { margin: 0; padding: 16px; background: #1f2937; color: #fff; font-size: 18px; }
+    .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; }
+    .pane { background: #fff; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; }
+    .title { background: #e5e7eb; padding: 10px 12px; font-weight: 700; }
+    pre { margin: 0; padding: 12px; overflow: auto; max-height: calc(100vh - 120px); line-height: 1.35; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>auto_setup_safe.sh vs auto_setup_safe_guided.sh</h1>
+  <div class="wrap">
+    <section class="pane">
+      <div class="title">tmp/auto_setup_safe.sh</div>
+      <pre>#!/data/data/com.termux/files/usr/bin/bash
+# ========================================================================
+# CloudBot + Shizuku safer installer (trimmed)
+# ========================================================================
+# This variant intentionally avoids:
+# 1) Piping or executing remote scripts
+# 2) Overwriting OpenClaw workspace identity/tool/agent files
+# 3) Auto-injecting broad phone control wrappers
+#
+# Review this file before running.
+# ========================================================================
+
+export DEBIAN_FRONTEND=noninteractive
+export DPKG_FORCE=confold
+export APT_LISTCHANGES_FRONTEND=none
+export LANG=C
+export LC_ALL=C
+
+echo &quot;&quot;
+echo &quot;CloudBot safer setup (trimmed)&quot;
+echo &quot;============================================================&quot;
+echo &quot;&quot;
+
+# ========================================================================
+# Step 1/3: Update packages and install dependencies
+# ========================================================================
+echo &quot;[1/3] Updating packages and installing dependencies...&quot;
+
+pkg update -y -o Dpkg::Options::=&quot;--force-confold&quot; -o Dpkg::Options::=&quot;--force-confdef&quot; &lt;/dev/null 2&gt;&amp;1 || {
+    echo &quot;WARN: pkg update had warnings; continuing.&quot;
+}
+
+pkg install -y curl nodejs git cmake make clang binutils nmap openssl android-tools which &lt;/dev/null 2&gt;&amp;1 || {
+    echo &quot;WARN: Some packages may have failed; checking essentials.&quot;
+}
+
+MISSING=&quot;&quot;
+for cmd in curl node git nmap adb; do
+    if ! command -v &quot;$cmd&quot; &lt;/dev/null &gt;/dev/null 2&gt;&amp;1; then
+        MISSING=&quot;$MISSING $cmd&quot;
+    fi
+done
+
+if [ -n &quot;$MISSING&quot; ]; then
+    echo &quot;ERROR: Missing critical commands:$MISSING&quot;
+    echo &quot;Try: pkg install -y curl nodejs git nmap android-tools&quot;
+    exit 1
+fi
+
+echo &quot;OK: dependencies installed&quot;
+
+# ========================================================================
+# Step 2/3: Setup Shizuku terminal helper scripts (rish, shizuku)
+# ========================================================================
+echo &quot;&quot;
+echo &quot;[2/3] Linking Shizuku to Termux...&quot;
+
+if [ ! -d &quot;$HOME/storage&quot; ]; then
+    echo &quot;Termux storage permission may prompt now; tap Allow.&quot;
+    echo &quot;y&quot; | termux-setup-storage &gt;/dev/null 2&gt;&amp;1 || true
+    sleep 3
+else
+    echo &quot;Storage access already configured.&quot;
+fi
+
+SHIZUKU_DIR=&quot;$HOME/storage/shared/Shizuku&quot;
+mkdir -p &quot;$SHIZUKU_DIR&quot; 2&gt;/dev/null || true
+
+cat &gt; &quot;$SHIZUKU_DIR/copy.sh&quot; &lt;&lt; &#39;SHIZUKU_EOF&#39;
+#!/data/data/com.termux/files/usr/bin/bash
+
+BASEDIR=$( dirname &quot;${0}&quot; )
+BIN=/data/data/com.termux/files/usr/bin
+HOME=/data/data/com.termux/files/home
+DEX=&quot;${BASEDIR}/rish_shizuku.dex&quot;
+
+if [ ! -f &quot;${DEX}&quot; ]; then
+  echo &quot;Cannot find ${DEX}&quot;
+  exit 1
+fi
+
+ARCH=$(getprop ro.product.cpu.abi 2&gt;/dev/null || echo &quot;arm64-v8a&quot;)
+case &quot;$ARCH&quot; in
+  arm64*) LIB_ARCH=&quot;arm64&quot; ;;
+  armeabi*) LIB_ARCH=&quot;arm&quot; ;;
+  x86_64*) LIB_ARCH=&quot;x86_64&quot; ;;
+  x86*) LIB_ARCH=&quot;x86&quot; ;;
+  *) LIB_ARCH=&quot;arm64&quot; ;;
+esac
+
+tee &quot;${BIN}/shizuku&quot; &gt; /dev/null &lt;&lt; EOF
+#!/data/data/com.termux/files/usr/bin/bash
+
+ports=\$( nmap -sT -p30000-50000 --open localhost 2&gt;/dev/null | grep &quot;open&quot; | cut -f1 -d/ )
+
+for port in \${ports}; do
+  result=\$( adb connect &quot;localhost:\${port}&quot; 2&gt;/dev/null )
+  if [[ &quot;\$result&quot; =~ &quot;connected&quot; || &quot;\$result&quot; =~ &quot;already&quot; ]]; then
+    echo &quot;\${result}&quot;
+    adb shell &quot;\$( adb shell pm path moe.shizuku.privileged.api | sed &#39;s/^package://;s/base\\\\.apk/lib\\\\/${LIB_ARCH}\\\\/libshizuku\\\\.so/&#39; )&quot;
+    adb shell settings put global adb_wifi_enabled 0
+    exit 0
+  fi
+done
+
+echo &quot;ERROR: No port found. Is wireless debugging enabled?&quot;
+exit 1
+EOF
+
+dex=&quot;${HOME}/rish_shizuku.dex&quot;
+
+tee &quot;${BIN}/rish&quot; &gt; /dev/null &lt;&lt; EOF
+#!/data/data/com.termux/files/usr/bin/bash
+
+[ -z &quot;\$RISH_APPLICATION_ID&quot; ] &amp;&amp; export RISH_APPLICATION_ID=&quot;com.termux&quot;
+/system/bin/app_process -Djava.class.path=&quot;${dex}&quot; /system/bin --nice-name=rish rikka.shizuku.shell.ShizukuShellLoader &quot;\${@}&quot;
+EOF
+
+chmod +x &quot;${BIN}/shizuku&quot; &quot;${BIN}/rish&quot;
+cp -f &quot;${DEX}&quot; &quot;${dex}&quot;
+chmod -w &quot;${dex}&quot;
+SHIZUKU_EOF
+
+chmod +x &quot;$SHIZUKU_DIR/copy.sh&quot;
+
+if [ ! -f &quot;$SHIZUKU_DIR/rish_shizuku.dex&quot; ]; then
+    echo &quot;ERROR: rish_shizuku.dex not found in $SHIZUKU_DIR&quot;
+    echo &quot;&quot;
+    echo &quot;Fix steps:&quot;
+    echo &quot;1) Open Shizuku app&quot;
+    echo &quot;2) Tap &#39;Use Shizuku in terminal apps&#39;&quot;
+    echo &quot;3) Tap &#39;Export files&#39;&quot;
+    echo &quot;4) Select Internal Storage/Shizuku&quot;
+    echo &quot;5) Run this script again&quot;
+    exit 1
+fi
+
+bash &quot;$SHIZUKU_DIR/copy.sh&quot; &lt;/dev/null &amp;&amp; {
+    echo &quot;OK: rish and shizuku commands installed&quot;
+} || {
+    echo &quot;WARN: copy.sh had issues; scripts may still be present&quot;
+}
+
+# ========================================================================
+# Step 3/3: Apply Node.js IPv4 DNS fix for Termux
+# ========================================================================
+echo &quot;&quot;
+echo &quot;[3/3] Applying Node.js IPv4 DNS fix...&quot;
+
+if ! grep -q &quot;NODE_OPTIONS=--dns-result-order=ipv4first&quot; ~/.bashrc 2&gt;/dev/null; then
+    echo &quot;export NODE_OPTIONS=--dns-result-order=ipv4first&quot; &gt;&gt; ~/.bashrc
+fi
+
+export NODE_OPTIONS=--dns-result-order=ipv4first
+echo &quot;OK: IPv4 DNS fix applied&quot;
+
+echo &quot;&quot;
+echo &quot;============================================================&quot;
+echo &quot;SAFE SETUP COMPLETE&quot;
+echo &quot;============================================================&quot;
+echo &quot;&quot;
+echo &quot;What was intentionally skipped:&quot;
+echo &quot;- Remote OpenClaw install command from external domain&quot;
+echo &quot;- OpenClaw workspace identity/tools/agents file overrides&quot;
+echo &quot;- Phone automation wrapper script injection&quot;
+echo &quot;&quot;
+echo &quot;Manual next steps (optional):&quot;
+echo &quot;1) Verify Shizuku: shizuku&quot;
+echo &quot;2) Verify shell bridge: rish -c whoami&quot;
+echo &quot;3) If needed, install OpenClaw manually from trusted instructions&quot;
+echo &quot;&quot;
+</pre>
+    </section>
+    <section class="pane">
+      <div class="title">tmp/auto_setup_safe_guided.sh</div>
+      <pre>#!/data/data/com.termux/files/usr/bin/bash
+# ========================================================================
+# CloudBot + Shizuku safer installer (guided)
+# ========================================================================
+# This variant intentionally avoids:
+# 1) Piping or executing remote scripts
+# 2) Overwriting OpenClaw workspace identity/tool/agent files
+# 3) Auto-injecting broad phone control wrappers
+#
+# Review this file before running.
+# ========================================================================
+
+export DEBIAN_FRONTEND=noninteractive
+export DPKG_FORCE=confold
+export APT_LISTCHANGES_FRONTEND=none
+export LANG=C
+export LC_ALL=C
+
+echo &quot;&quot;
+echo &quot;CloudBot safer setup (guided)&quot;
+echo &quot;============================================================&quot;
+echo &quot;&quot;
+
+# ========================================================================
+# Step 1/4: Update packages and install dependencies
+# ========================================================================
+echo &quot;[1/4] Updating packages and installing dependencies...&quot;
+
+pkg update -y -o Dpkg::Options::=&quot;--force-confold&quot; -o Dpkg::Options::=&quot;--force-confdef&quot; &lt;/dev/null 2&gt;&amp;1 || {
+    echo &quot;WARN: pkg update had warnings; continuing.&quot;
+}
+
+pkg install -y curl nodejs git cmake make clang binutils nmap openssl android-tools which &lt;/dev/null 2&gt;&amp;1 || {
+    echo &quot;WARN: Some packages may have failed; checking essentials.&quot;
+}
+
+MISSING=&quot;&quot;
+for cmd in curl node git nmap adb; do
+    if ! command -v &quot;$cmd&quot; &lt;/dev/null &gt;/dev/null 2&gt;&amp;1; then
+        MISSING=&quot;$MISSING $cmd&quot;
+    fi
+done
+
+if [ -n &quot;$MISSING&quot; ]; then
+    echo &quot;ERROR: Missing critical commands:$MISSING&quot;
+    echo &quot;Try: pkg install -y curl nodejs git nmap android-tools&quot;
+    exit 1
+fi
+
+echo &quot;OK: dependencies installed&quot;
+
+# ========================================================================
+# Step 2/4: Setup Shizuku terminal helper scripts (rish, shizuku)
+# ========================================================================
+echo &quot;&quot;
+echo &quot;[2/4] Linking Shizuku to Termux...&quot;
+
+if [ ! -d &quot;$HOME/storage&quot; ]; then
+    echo &quot;Termux storage permission may prompt now; tap Allow.&quot;
+    echo &quot;y&quot; | termux-setup-storage &gt;/dev/null 2&gt;&amp;1 || true
+    sleep 3
+else
+    echo &quot;Storage access already configured.&quot;
+fi
+
+SHIZUKU_DIR=&quot;$HOME/storage/shared/Shizuku&quot;
+mkdir -p &quot;$SHIZUKU_DIR&quot; 2&gt;/dev/null || true
+
+cat &gt; &quot;$SHIZUKU_DIR/copy.sh&quot; &lt;&lt; &#39;SHIZUKU_EOF&#39;
+#!/data/data/com.termux/files/usr/bin/bash
+
+BASEDIR=$( dirname &quot;${0}&quot; )
+BIN=/data/data/com.termux/files/usr/bin
+HOME=/data/data/com.termux/files/home
+DEX=&quot;${BASEDIR}/rish_shizuku.dex&quot;
+
+if [ ! -f &quot;${DEX}&quot; ]; then
+  echo &quot;Cannot find ${DEX}&quot;
+  exit 1
+fi
+
+ARCH=$(getprop ro.product.cpu.abi 2&gt;/dev/null || echo &quot;arm64-v8a&quot;)
+case &quot;$ARCH&quot; in
+  arm64*) LIB_ARCH=&quot;arm64&quot; ;;
+  armeabi*) LIB_ARCH=&quot;arm&quot; ;;
+  x86_64*) LIB_ARCH=&quot;x86_64&quot; ;;
+  x86*) LIB_ARCH=&quot;x86&quot; ;;
+  *) LIB_ARCH=&quot;arm64&quot; ;;
+esac
+
+tee &quot;${BIN}/shizuku&quot; &gt; /dev/null &lt;&lt; EOF
+#!/data/data/com.termux/files/usr/bin/bash
+
+ports=\$( nmap -sT -p30000-50000 --open localhost 2&gt;/dev/null | grep &quot;open&quot; | cut -f1 -d/ )
+
+for port in \${ports}; do
+  result=\$( adb connect &quot;localhost:\${port}&quot; 2&gt;/dev/null )
+  if [[ &quot;\$result&quot; =~ &quot;connected&quot; || &quot;\$result&quot; =~ &quot;already&quot; ]]; then
+    echo &quot;\${result}&quot;
+    adb shell &quot;\$( adb shell pm path moe.shizuku.privileged.api | sed &#39;s/^package://;s/base\\\\.apk/lib\\\\/${LIB_ARCH}\\\\/libshizuku\\\\.so/&#39; )&quot;
+    adb shell settings put global adb_wifi_enabled 0
+    exit 0
+  fi
+done
+
+echo &quot;ERROR: No port found. Is wireless debugging enabled?&quot;
+exit 1
+EOF
+
+dex=&quot;${HOME}/rish_shizuku.dex&quot;
+
+tee &quot;${BIN}/rish&quot; &gt; /dev/null &lt;&lt; EOF
+#!/data/data/com.termux/files/usr/bin/bash
+
+[ -z &quot;\$RISH_APPLICATION_ID&quot; ] &amp;&amp; export RISH_APPLICATION_ID=&quot;com.termux&quot;
+/system/bin/app_process -Djava.class.path=&quot;${dex}&quot; /system/bin --nice-name=rish rikka.shizuku.shell.ShizukuShellLoader &quot;\${@}&quot;
+EOF
+
+chmod +x &quot;${BIN}/shizuku&quot; &quot;${BIN}/rish&quot;
+cp -f &quot;${DEX}&quot; &quot;${dex}&quot;
+chmod -w &quot;${dex}&quot;
+SHIZUKU_EOF
+
+chmod +x &quot;$SHIZUKU_DIR/copy.sh&quot;
+
+if [ ! -f &quot;$SHIZUKU_DIR/rish_shizuku.dex&quot; ]; then
+    echo &quot;ERROR: rish_shizuku.dex not found in $SHIZUKU_DIR&quot;
+    echo &quot;&quot;
+    echo &quot;Fix steps:&quot;
+    echo &quot;1) Open Shizuku app&quot;
+    echo &quot;2) Tap &#39;Use Shizuku in terminal apps&#39;&quot;
+    echo &quot;3) Tap &#39;Export files&#39;&quot;
+    echo &quot;4) Select Internal Storage/Shizuku&quot;
+    echo &quot;5) Run this script again&quot;
+    exit 1
+fi
+
+bash &quot;$SHIZUKU_DIR/copy.sh&quot; &lt;/dev/null &amp;&amp; {
+    echo &quot;OK: rish and shizuku commands installed&quot;
+} || {
+    echo &quot;WARN: copy.sh had issues; scripts may still be present&quot;
+}
+
+# ========================================================================
+# Step 3/4: Apply Node.js IPv4 DNS fix for Termux
+# ========================================================================
+echo &quot;&quot;
+echo &quot;[3/4] Applying Node.js IPv4 DNS fix...&quot;
+
+if ! grep -q &quot;NODE_OPTIONS=--dns-result-order=ipv4first&quot; ~/.bashrc 2&gt;/dev/null; then
+    echo &quot;export NODE_OPTIONS=--dns-result-order=ipv4first&quot; &gt;&gt; ~/.bashrc
+fi
+
+export NODE_OPTIONS=--dns-result-order=ipv4first
+echo &quot;OK: IPv4 DNS fix applied&quot;
+
+# ========================================================================
+# Step 4/4: Guided manual OpenClaw install (no auto execution)
+# ========================================================================
+echo &quot;&quot;
+echo &quot;[4/4] OpenClaw install guidance (manual, no remote execution)&quot;
+echo &quot;&quot;
+echo &quot;To keep this installer safe, OpenClaw is NOT auto-installed.&quot;
+echo &quot;Use trusted docs and run only commands you verify first.&quot;
+echo &quot;&quot;
+echo &quot;Suggested checks before install:&quot;
+echo &quot;1) Confirm command source and domain authenticity&quot;
+echo &quot;2) Download script to file first, inspect it, then run from file&quot;
+echo &quot;3) Avoid piping network output directly to bash&quot;
+echo &quot;&quot;
+echo &quot;After manual OpenClaw install, recommended setup:&quot;
+echo &quot;1) openclaw onboard&quot;
+echo &quot;2) openclaw auth add google --key YOUR_GEMINI_KEY&quot;
+echo &quot;3) openclaw gateway&quot;
+
+echo &quot;&quot;
+echo &quot;============================================================&quot;
+echo &quot;GUIDED SAFE SETUP COMPLETE&quot;
+echo &quot;============================================================&quot;
+echo &quot;&quot;
+echo &quot;What was intentionally skipped:&quot;
+echo &quot;- Remote OpenClaw install command from external domain&quot;
+echo &quot;- OpenClaw workspace identity/tools/agents file overrides&quot;
+echo &quot;- Phone automation wrapper script injection&quot;
+echo &quot;&quot;
+echo &quot;Manual next steps (optional):&quot;
+echo &quot;1) Verify Shizuku: shizuku&quot;
+echo &quot;2) Verify shell bridge: rish -c whoami&quot;
+echo &quot;3) If needed, install OpenClaw manually from trusted instructions&quot;
+echo &quot;&quot;
+</pre>
+    </section>
+  </div>
+</body>
+</html>

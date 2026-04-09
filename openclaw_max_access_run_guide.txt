@@ -1,0 +1,13 @@
+Run guide for Android Termux
+
+1) Copy script to your phone (for example into home directory)
+2) In Termux:
+chmod +x ~/openclaw_max_access.sh
+bash ~/openclaw_max_access.sh
+
+Optional checks after script finishes:
+shizuku
+rish -c whoami
+openclaw onboard
+openclaw auth add google --key YOUR_GEMINI_KEY
+openclaw gateway
